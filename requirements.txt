@@ -1,0 +1,13 @@
+fastapi==0.115.0
+uvicorn[standard]==0.30.6
+pydantic==2.9.2
+python-multipart==0.0.9
+
+# Modelos de visión por computador
+mediapipe==0.10.14
+ultralytics==8.2.103
+opencv-python-headless==4.10.0.84
+numpy==1.26.4
+
+# Testing
+pytest==8.3.3
