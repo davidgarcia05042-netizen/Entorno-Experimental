@@ -5,7 +5,7 @@ python-multipart==0.0.9
 
 # Modelos de visión por computador
 mediapipe==0.10.14
-ultralytics==8.2.103
+ultralytics==8.4.128
 opencv-python-headless==4.10.0.84
 numpy==1.26.4
 
