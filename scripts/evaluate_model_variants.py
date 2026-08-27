@@ -4,12 +4,21 @@ MediaPipe Lite/Full/Heavy) contra el gold standard, reusando el offset de
 sincronización ya confirmado (ver scripts/sync_video_to_ground_truth.py --
 NO se recalcula por variante, mismo criterio que evaluate_against_ground_truth.py).
 
-Uso:
+Uso (barrido completo):
     python -m scripts.evaluate_model_variants \
         --video data/gold_standard/marcha_katherine_2026-06-19/video.mp4 \
         --maxtraq data/gold_standard/marcha_katherine_2026-06-19/maxtraq.TXT \
         --offset -0.02 --leg left_knee \
         --out data/gold_standard/marcha_katherine_2026-06-19/variants_report.png
+
+Uso (subconjunto de variantes + guardar keypoints/CSV de la corrida):
+    python -m scripts.evaluate_model_variants \
+        --video data/gold_standard/marcha_katherine_2026-06-19/video.mp4 \
+        --maxtraq data/gold_standard/marcha_katherine_2026-06-19/maxtraq.TXT \
+        --offset -0.02 --leg left_knee \
+        --models yolo26n mediapipe_heavy \
+        --out data/gold_standard/marcha_katherine_2026-06-19/variants_report.png \
+        --store-dir data/gold_standard/marcha_katherine_2026-06-19
 """
 
 import argparse
@@ -23,6 +32,7 @@ import matplotlib.pyplot as plt
 from app.core.ground_truth import compare_angle_series, knee_angle_series_deg, parse_maxtraq_txt, resample_series
 from app.core.keypoint_schema import Keypoint, UnifiedKeypoint
 from app.core.metrics import compute_joint_angles
+from app.core.results_store import create_run_dir, save_frame_metrics_csv, save_keypoints_json, save_run_info, save_summary_csv
 from app.core.video_processor import process_video
 from app.models.mediapipe_pose import MediaPipePoseEstimator
 from app.models.yolov8_pose import YoloV8PoseEstimator
@@ -50,7 +60,7 @@ MEDIAPIPE_VARIANTS = {
 }
 
 
-def _angle_series(video_path: str, estimator, model_name: ModelName, leg: str) -> tuple[list[float], list[float]]:
+def _angle_series(video_path: str, estimator, model_name: ModelName, leg: str):
     with estimator:
         result = process_video(video_path, "variant_eval", estimator, model_name)
 
@@ -62,7 +72,7 @@ def _angle_series(video_path: str, estimator, model_name: ModelName, leg: str) -
             for kp in frame.keypoints
         ]
         angles.append(compute_joint_angles(kpts)[leg])
-    return times_s, angles
+    return times_s, angles, result
 
 
 def main() -> None:
@@ -74,7 +84,31 @@ def main() -> None:
     parser.add_argument("--out", required=True, help="Gráfico de barras (error medio por variante)")
     parser.add_argument("--out-yolo-curves", help="Gráfico de líneas: variantes YOLOv8 vs. gold standard")
     parser.add_argument("--out-mediapipe-curves", help="Gráfico de líneas: variantes MediaPipe vs. gold standard")
+    parser.add_argument(
+        "--models",
+        nargs="+",
+        help="Subconjunto de variantes a correr (por defecto todas). "
+        f"Disponibles: {', '.join(list(YOLO_VARIANTS) + list(MEDIAPIPE_VARIANTS))}",
+    )
+    parser.add_argument(
+        "--store-dir",
+        help="Si se da, guarda keypoints (JSON) y métricas por frame/resumen (CSV) de esta "
+        "corrida en <store-dir>/runs/<timestamp>/",
+    )
     args = parser.parse_args()
+
+    yolo_variants = YOLO_VARIANTS
+    mediapipe_variants = MEDIAPIPE_VARIANTS
+    if args.models:
+        unknown = set(args.models) - set(YOLO_VARIANTS) - set(MEDIAPIPE_VARIANTS)
+        if unknown:
+            raise SystemExit(f"Variantes desconocidas en --models: {sorted(unknown)}")
+        yolo_variants = {k: v for k, v in YOLO_VARIANTS.items() if k in args.models}
+        mediapipe_variants = {k: v for k, v in MEDIAPIPE_VARIANTS.items() if k in args.models}
+
+    run_dir = create_run_dir(args.store_dir) if args.store_dir else None
+    if run_dir:
+        print(f"Guardando keypoints y métricas de esta corrida en: {run_dir}")
 
     recording = parse_maxtraq_txt(args.maxtraq)
     gt_times = recording.times_s
@@ -83,11 +117,11 @@ def main() -> None:
     results: dict[str, dict] = {}
     curves: dict[str, list[float]] = {}
 
-    for label, make_estimator in YOLO_VARIANTS.items():
+    for label, make_estimator in yolo_variants.items():
         print(f"Procesando {label}...")
         t0 = time.perf_counter()
         try:
-            times, angles = _angle_series(args.video, make_estimator(), ModelName.YOLOV8, args.leg)
+            times, angles, raw_result = _angle_series(args.video, make_estimator(), ModelName.YOLOV8, args.leg)
         except Exception as exc:
             print(f"  ERROR con {label}: {exc}")
             continue
@@ -99,12 +133,14 @@ def main() -> None:
         report["elapsed_s"] = round(elapsed, 1)
         results[label] = report
         curves[label] = pred_on_grid
+        if run_dir:
+            save_keypoints_json(run_dir, label, raw_result)
         print(f"  -> error medio {report['mean_error_deg']}°  ({elapsed:.1f}s)")
 
-    for label, complexity in MEDIAPIPE_VARIANTS.items():
+    for label, complexity in mediapipe_variants.items():
         print(f"Procesando {label} (model_complexity={complexity})...")
         t0 = time.perf_counter()
-        times, angles = _angle_series(
+        times, angles, raw_result = _angle_series(
             args.video, MediaPipePoseEstimator(model_complexity=complexity), ModelName.MEDIAPIPE, args.leg
         )
         elapsed = time.perf_counter() - t0
@@ -115,7 +151,25 @@ def main() -> None:
         report["elapsed_s"] = round(elapsed, 1)
         results[label] = report
         curves[label] = pred_on_grid
+        if run_dir:
+            save_keypoints_json(run_dir, label, raw_result)
         print(f"  -> error medio {report['mean_error_deg']}°  ({elapsed:.1f}s)")
+
+    if run_dir:
+        save_frame_metrics_csv(run_dir, gt_times, gt_angles, curves, args.leg)
+        save_summary_csv(run_dir, results)
+        save_run_info(
+            run_dir,
+            {
+                "video": args.video,
+                "maxtraq": args.maxtraq,
+                "offset_s": args.offset,
+                "leg": args.leg,
+                "models": list(results.keys()),
+                "timestamp_utc": run_dir.name,
+            },
+        )
+        print(f"Keypoints + CSV guardados en: {run_dir}")
 
     print()
     print(f"{'Variante':16s} {'Error medio':>12s} {'Error max':>10s} {'Tiempo':>8s} {'Clasificación':>15s}")

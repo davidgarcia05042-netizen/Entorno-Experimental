@@ -12,3 +12,7 @@ __pycache__/
 # Datos del laboratorio (videos de pacientes reales + mocap) -- nunca subir
 # a git, contienen información identificable del paciente.
 data/
+
+# Videos anotados de resultados/ (aunque sean genéricos/stock, son binarios
+# pesados y no deben publicarse a git -- los JSON de keypoints sí se conservan).
+resultados/*.mp4

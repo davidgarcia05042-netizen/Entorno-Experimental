@@ -24,6 +24,8 @@ from app.core.keypoint_schema import COCO_ORDER, MEDIAPIPE_INDEX, YOLO_COCO_INDE
 from app.core.metrics import angular_error_report, mpjpe, pck
 from app.core.occlusion import apply_occlusion, occlusion_fraction_of_frame, region_from_fixed_fraction
 from app.core.platform_export import parse_platform_csv_angle_series, parse_platform_json_angle_series
+from app.core.results_store import create_run_dir, save_frame_metrics_csv, save_keypoints_json, save_summary_csv
+from app.schemas.pose_result import ModelName, VideoAnalysisResult
 
 
 def test_keypoint_schema_has_all_17_coco_points():
@@ -212,3 +214,54 @@ def test_parse_platform_json_angle_series_skips_frames_missing_codename(tmp_path
     times, angles = parse_platform_json_angle_series(path, codename="LEFT_KNEE")
     assert times == [0.0]
     assert angles == [157.6]
+
+
+def test_create_run_dir_makes_a_timestamped_folder_under_runs(tmp_path: Path):
+    run_dir = create_run_dir(tmp_path)
+
+    assert run_dir.is_dir()
+    assert run_dir.parent.name == "runs"
+    assert run_dir.parent.parent == tmp_path
+
+
+def test_save_keypoints_json_writes_readable_pose_result(tmp_path: Path):
+    result = VideoAnalysisResult(
+        video_id="test_video",
+        model_name=ModelName.YOLOV8,
+        fps=30.0,
+        total_frames=0,
+        frames=[],
+        mean_latency_ms=0.0,
+    )
+    run_dir = create_run_dir(tmp_path)
+
+    out_path = save_keypoints_json(run_dir, "yolo26n", result)
+
+    assert out_path.exists()
+    assert '"video_id":"test_video"' in out_path.read_text(encoding="utf-8").replace(" ", "").replace("\n", "")
+
+
+def test_save_frame_metrics_csv_includes_error_per_model(tmp_path: Path):
+    run_dir = create_run_dir(tmp_path)
+    gt_times = [0.0, 1.0]
+    gt_angles = [180.0, 170.0]
+    model_curves = {"yolo26n": [175.0, 168.0], "mediapipe_heavy": [178.0, 172.0]}
+
+    out_path = save_frame_metrics_csv(run_dir, gt_times, gt_angles, model_curves, leg="left_knee")
+
+    lines = out_path.read_text(encoding="utf-8").strip().splitlines()
+    assert lines[0] == "frame_idx,time_s,gt_left_knee_angle_deg,yolo26n_angle_deg,yolo26n_error_deg,mediapipe_heavy_angle_deg,mediapipe_heavy_error_deg"
+    assert lines[1] == "0,0.0,180.0,175.0,5.0,178.0,2.0"
+
+
+def test_save_summary_csv_writes_one_row_per_variant(tmp_path: Path):
+    run_dir = create_run_dir(tmp_path)
+    reports = {
+        "yolo26n": {"mean_error_deg": 8.45, "max_error_deg": 20.1, "n_frames": 333, "classification": "moderado", "elapsed_s": 19.5},
+    }
+
+    out_path = save_summary_csv(run_dir, reports)
+
+    lines = out_path.read_text(encoding="utf-8").strip().splitlines()
+    assert lines[0] == "variante,error_medio_deg,error_max_deg,n_frames,clasificacion,tiempo_s"
+    assert lines[1] == "yolo26n,8.45,20.1,333,moderado,19.5"
