@@ -1,14 +1,19 @@
 """Persistencia de resultados por ejecución contra el gold standard.
 
-Cada ejecución guarda, bajo una carpeta con timestamp (para no sobrescribir
-corridas anteriores): los keypoints crudos por modelo (JSON, mismo esquema
-que `run_single_video.py`), el ángulo/error por frame de cada modelo frente
-al gold standard (CSV), el resumen por variante (CSV) y los metadatos de la
-corrida (offset de sincronización, pierna, video, timestamp).
+Jerarquía de carpetas (una por video, ya en `.gitignore` bajo
+`data/gold_standard/<video>/` -- estos datos se derivan de video de
+paciente y no deben publicarse a git):
 
-Pensado para vivir bajo `data/gold_standard/<video>/`, que ya está en
-`.gitignore` -- estos datos se derivan de video de paciente y no deben
-publicarse a git.
+    <video_dir>/<model_label>/<condition>/<timestamp_utc>/
+        metrics/            keypoints (JSON), frame_metrics.csv, summary.csv, run_info.json
+        graphs/curves/      curva de este modelo vs. gold standard (PNG)
+        graphs/bars/        barra de error medio de este modelo (PNG)
+        videos/             video anotado con keypoints (solo si se pidió, no siempre existe)
+
+`condition` es una de "no_occlusion", "occlusion", "illumination" (o
+"occlusion_illumination" si ambas se aplican a la vez) -- cada modelo y
+cada condición quedan completamente separados, con su propio timestamp de
+corrida para no perder historial al repetir una evaluación.
 """
 
 from __future__ import annotations
@@ -21,18 +26,18 @@ from pathlib import Path
 from app.schemas.pose_result import VideoAnalysisResult
 
 
-def create_run_dir(base_dir: str | Path, subdir: str | None = None) -> Path:
+def create_run_dir(video_dir: str | Path, model_label: str, condition: str) -> Path:
     """
-    Crea (y devuelve) `<base_dir>/runs/<timestamp_utc>/`, o
-    `<base_dir>/runs/<subdir>/<timestamp_utc>/` si se pasa `subdir`.
-
-    `subdir` sirve para separar condiciones de la corrida que no deben
-    mezclarse (ej. "no_occlusion" vs. "occlusion_left_knee"), sin perder el
-    versionado por timestamp dentro de cada una.
+    Crea (y devuelve) `<video_dir>/<model_label>/<condition>/<timestamp_utc>/`,
+    con `metrics/` y `graphs/{curves,bars}/` ya creadas. `videos/` NO se
+    crea aquí -- se crea bajo demanda solo cuando se guarda un video
+    anotado, ya que no todas las corridas lo necesitan.
     """
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    run_dir = Path(base_dir) / "runs" / (subdir or "") / timestamp
-    run_dir.mkdir(parents=True, exist_ok=True)
+    run_dir = Path(video_dir) / model_label / condition / timestamp
+    (run_dir / "metrics").mkdir(parents=True, exist_ok=True)
+    (run_dir / "graphs" / "curves").mkdir(parents=True, exist_ok=True)
+    (run_dir / "graphs" / "bars").mkdir(parents=True, exist_ok=True)
     return run_dir
 
 

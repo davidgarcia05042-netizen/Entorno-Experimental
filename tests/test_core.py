@@ -216,21 +216,27 @@ def test_parse_platform_json_angle_series_skips_frames_missing_codename(tmp_path
     assert angles == [157.6]
 
 
-def test_create_run_dir_makes_a_timestamped_folder_under_runs(tmp_path: Path):
-    run_dir = create_run_dir(tmp_path)
+def test_create_run_dir_builds_model_condition_timestamp_hierarchy(tmp_path: Path):
+    run_dir = create_run_dir(tmp_path, model_label="yolo26n", condition="no_occlusion")
 
     assert run_dir.is_dir()
-    assert run_dir.parent.name == "runs"
-    assert run_dir.parent.parent == tmp_path
+    assert run_dir.parent.name == "no_occlusion"
+    assert run_dir.parent.parent.name == "yolo26n"
+    assert run_dir.parent.parent.parent == tmp_path
+    assert (run_dir / "metrics").is_dir()
+    assert (run_dir / "graphs" / "curves").is_dir()
+    assert (run_dir / "graphs" / "bars").is_dir()
+    assert not (run_dir / "videos").exists()  # se crea bajo demanda, no siempre
 
 
-def test_create_run_dir_with_subdir_separates_occlusion_conditions(tmp_path: Path):
-    no_occlusion_dir = create_run_dir(tmp_path, subdir="no_occlusion")
-    occlusion_dir = create_run_dir(tmp_path, subdir="occlusion_left_knee")
+def test_create_run_dir_separates_models_and_conditions(tmp_path: Path):
+    no_occlusion_dir = create_run_dir(tmp_path, model_label="yolo26n", condition="no_occlusion")
+    occlusion_dir = create_run_dir(tmp_path, model_label="yolo26n", condition="occlusion")
+    other_model_dir = create_run_dir(tmp_path, model_label="mediapipe_heavy", condition="no_occlusion")
 
-    assert no_occlusion_dir.parent.name == "no_occlusion"
-    assert occlusion_dir.parent.name == "occlusion_left_knee"
-    assert no_occlusion_dir.parent.parent == occlusion_dir.parent.parent == tmp_path / "runs"
+    assert no_occlusion_dir != occlusion_dir != other_model_dir
+    assert no_occlusion_dir.parent.parent == occlusion_dir.parent.parent == tmp_path / "yolo26n"
+    assert other_model_dir.parent.parent == tmp_path / "mediapipe_heavy"
 
 
 def test_save_keypoints_json_writes_readable_pose_result(tmp_path: Path):
@@ -242,21 +248,21 @@ def test_save_keypoints_json_writes_readable_pose_result(tmp_path: Path):
         frames=[],
         mean_latency_ms=0.0,
     )
-    run_dir = create_run_dir(tmp_path)
+    run_dir = create_run_dir(tmp_path, model_label="yolo26n", condition="no_occlusion")
 
-    out_path = save_keypoints_json(run_dir, "yolo26n", result)
+    out_path = save_keypoints_json(run_dir / "metrics", "yolo26n", result)
 
     assert out_path.exists()
     assert '"video_id":"test_video"' in out_path.read_text(encoding="utf-8").replace(" ", "").replace("\n", "")
 
 
 def test_save_frame_metrics_csv_includes_error_per_model(tmp_path: Path):
-    run_dir = create_run_dir(tmp_path)
+    run_dir = create_run_dir(tmp_path, model_label="yolo26n", condition="no_occlusion")
     gt_times = [0.0, 1.0]
     gt_angles = [180.0, 170.0]
     model_curves = {"yolo26n": [175.0, 168.0], "mediapipe_heavy": [178.0, 172.0]}
 
-    out_path = save_frame_metrics_csv(run_dir, gt_times, gt_angles, model_curves, leg="left_knee")
+    out_path = save_frame_metrics_csv(run_dir / "metrics", gt_times, gt_angles, model_curves, leg="left_knee")
 
     lines = out_path.read_text(encoding="utf-8").strip().splitlines()
     assert lines[0] == "frame_idx,time_s,gt_left_knee_angle_deg,yolo26n_angle_deg,yolo26n_error_deg,mediapipe_heavy_angle_deg,mediapipe_heavy_error_deg"
@@ -264,12 +270,12 @@ def test_save_frame_metrics_csv_includes_error_per_model(tmp_path: Path):
 
 
 def test_save_summary_csv_writes_one_row_per_variant(tmp_path: Path):
-    run_dir = create_run_dir(tmp_path)
+    run_dir = create_run_dir(tmp_path, model_label="yolo26n", condition="no_occlusion")
     reports = {
         "yolo26n": {"mean_error_deg": 8.45, "max_error_deg": 20.1, "n_frames": 333, "classification": "moderado", "elapsed_s": 19.5},
     }
 
-    out_path = save_summary_csv(run_dir, reports)
+    out_path = save_summary_csv(run_dir / "metrics", reports)
 
     lines = out_path.read_text(encoding="utf-8").strip().splitlines()
     assert lines[0] == "variante,error_medio_deg,error_max_deg,n_frames,clasificacion,tiempo_s"

@@ -1,8 +1,9 @@
 """
 Compara dos corridas YA GUARDADAS por evaluate_model_variants.py --store-dir
-(ej. runs/no_occlusion/<timestamp> vs. runs/occlusion_left_knee/<timestamp>
-del mismo video) sin volver a correr los modelos -- lee directamente
-summary.csv y frame_metrics.csv de cada corrida.
+(ej. <video>/yolo26n/no_occlusion/<timestamp> vs.
+<video>/yolo26n/occlusion/<timestamp>, incluso de modelos distintos si se
+quiere) sin volver a correr los modelos -- lee directamente
+metrics/summary.csv y metrics/frame_metrics.csv de cada corrida.
 
 Genera:
   --out-bar         gráfico de barras agrupado (error medio por modelo,
@@ -12,9 +13,9 @@ Genera:
 
 Uso:
     python -m scripts.compare_runs \
-        --run-a data/gold_standard/marcha_katherine_2026-06-19/runs/no_occlusion/20260831T230911Z \
+        --run-a data/gold_standard/marcha_katherine_2026-06-19/yolo26n/no_occlusion/20260901T120000Z \
         --label-a "Sin oclusión" \
-        --run-b data/gold_standard/marcha_katherine_2026-06-19/runs/occlusion_left_knee/20260831T231038Z \
+        --run-b data/gold_standard/marcha_katherine_2026-06-19/yolo26n/occlusion/20260901T120500Z \
         --label-b "Con oclusión (rodilla izq.)" \
         --out-bar data/gold_standard/marcha_katherine_2026-06-19/compare_occlusion_bar.png \
         --out-curves-dir data/gold_standard/marcha_katherine_2026-06-19/compare_occlusion_curves
@@ -32,12 +33,12 @@ import numpy as np
 
 
 def _read_summary(run_dir: Path) -> dict[str, float]:
-    with (run_dir / "summary.csv").open(newline="", encoding="utf-8") as f:
+    with (run_dir / "metrics" / "summary.csv").open(newline="", encoding="utf-8") as f:
         return {row["variante"]: float(row["error_medio_deg"]) for row in csv.DictReader(f)}
 
 
 def _read_frame_metrics(run_dir: Path) -> tuple[list[float], list[float], dict[str, list[float]]]:
-    with (run_dir / "frame_metrics.csv").open(newline="", encoding="utf-8") as f:
+    with (run_dir / "metrics" / "frame_metrics.csv").open(newline="", encoding="utf-8") as f:
         reader = csv.DictReader(f)
         fieldnames = reader.fieldnames or []
         rows = list(reader)

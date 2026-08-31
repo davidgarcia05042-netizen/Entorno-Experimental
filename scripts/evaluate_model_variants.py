@@ -1,42 +1,47 @@
 """
-Barre las variantes de tamaño/peso de cada modelo (YOLOv8 nano/small/medium,
-MediaPipe Lite/Full/Heavy) contra el gold standard, reusando el offset de
-sincronización ya confirmado (ver scripts/sync_video_to_ground_truth.py --
-NO se recalcula por variante, mismo criterio que evaluate_against_ground_truth.py).
+Evalúa modelos de pose contra el gold standard y guarda cada corrida en la
+jerarquía estándar del proyecto (ver app/core/results_store.py):
 
-Uso (barrido completo):
+    <video_dir>/<modelo>/<condicion>/<timestamp>/
+        metrics/            keypoints (JSON), frame_metrics.csv, summary.csv, run_info.json
+        graphs/curves/      curva de este modelo vs. gold standard
+        graphs/bars/        barra de error medio de este modelo
+        videos/             video anotado (solo si se pide --save-video)
+
+`condicion` es "no_occlusion" (default), "occlusion" (--occlude-knee),
+"illumination" (--illumination), o "occlusion_illumination" si ambas se
+combinan. Cada modelo procesado en una misma invocación se guarda en su
+propia carpeta -- nunca se mezclan modelos ni condiciones distintas.
+
+Uso (barrido completo, sin guardar nada -- solo consola + gráfico combinado):
     python -m scripts.evaluate_model_variants \
         --video data/gold_standard/marcha_katherine_2026-06-19/video.mp4 \
         --maxtraq data/gold_standard/marcha_katherine_2026-06-19/maxtraq.TXT \
         --offset -0.02 --leg left_knee \
         --out data/gold_standard/marcha_katherine_2026-06-19/variants_report.png
 
-Uso (subconjunto de variantes + guardar keypoints/CSV de la corrida):
+Uso (guardado automático por modelo, sin oclusión):
     python -m scripts.evaluate_model_variants \
         --video data/gold_standard/marcha_katherine_2026-06-19/video.mp4 \
         --maxtraq data/gold_standard/marcha_katherine_2026-06-19/maxtraq.TXT \
         --offset -0.02 --leg left_knee \
-        --models yolo26n mediapipe_heavy \
-        --out data/gold_standard/marcha_katherine_2026-06-19/variants_report.png \
+        --models yolo26n mediapipe_heavy mediapipe_lite \
         --store-dir data/gold_standard/marcha_katherine_2026-06-19
 
-Uso (con oclusión sintética sobre la rodilla, auto-centrada -- ver
-app/core/occlusion.py): igual que arriba más --occlude-knee auto. Si se
-pasa --store-dir, los resultados quedan en una subcarpeta separada de los
-runs sin oclusión (runs/no_occlusion/ vs. runs/occlusion_<pierna>_knee/),
-para no mezclar ambas condiciones:
+Uso (con oclusión auto-centrada en la rodilla, o con iluminación simulada
+-- cada una cae en su propia carpeta "occlusion"/"illumination"):
     python -m scripts.evaluate_model_variants \
         --video data/gold_standard/marcha_katherine_2026-06-19/video.mp4 \
         --maxtraq data/gold_standard/marcha_katherine_2026-06-19/maxtraq.TXT \
         --offset -0.02 --leg left_knee \
         --models yolo26n mediapipe_heavy mediapipe_lite \
         --occlude-knee auto \
-        --out data/gold_standard/marcha_katherine_2026-06-19/variants_occluded.png \
         --store-dir data/gold_standard/marcha_katherine_2026-06-19
 """
 
 import argparse
 import time
+from pathlib import Path
 
 import matplotlib
 
@@ -44,6 +49,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 from app.core.ground_truth import compare_angle_series, knee_angle_series_deg, parse_maxtraq_txt, resample_series
+from app.core.illumination import IlluminationLevel
 from app.core.keypoint_schema import Keypoint, UnifiedKeypoint
 from app.core.metrics import compute_joint_angles
 from app.core.occlusion import detect_reference_knee_position, get_first_frame_shape, region_around_point
@@ -75,9 +81,34 @@ MEDIAPIPE_VARIANTS = {
 }
 
 
-def _angle_series(video_path: str, estimator, model_name: ModelName, leg: str, occlusion_region=None):
+def _condition_label(occlude_knee: str | None, illumination: str | None) -> str:
+    parts = []
+    if occlude_knee:
+        parts.append("occlusion")
+    if illumination:
+        parts.append("illumination")
+    return "_".join(parts) if parts else "no_occlusion"
+
+
+def _angle_series(
+    video_path: str,
+    estimator,
+    model_name: ModelName,
+    leg: str,
+    occlusion_region=None,
+    illumination_level=None,
+    output_video_path: str | None = None,
+):
     with estimator:
-        result = process_video(video_path, "variant_eval", estimator, model_name, occlusion_region=occlusion_region)
+        result = process_video(
+            video_path,
+            "variant_eval",
+            estimator,
+            model_name,
+            illumination_level=illumination_level,
+            occlusion_region=occlusion_region,
+            output_video_path=output_video_path,
+        )
 
     times_s = [f.timestamp_ms / 1000 for f in result.frames]
     angles = []
@@ -90,15 +121,64 @@ def _angle_series(video_path: str, estimator, model_name: ModelName, leg: str, o
     return times_s, angles, result
 
 
+def _store_single_model_run(
+    run_dir: Path,
+    label: str,
+    condition: str,
+    gt_times: list[float],
+    gt_angles: list[float],
+    pred_on_grid: list[float],
+    report: dict,
+    raw_result,
+    run_meta: dict,
+) -> None:
+    """Guarda metrics/ (JSON+CSV) y graphs/{curves,bars}/ (PNG) de UN modelo en su run_dir ya creado."""
+    metrics_dir = run_dir / "metrics"
+    save_keypoints_json(metrics_dir, label, raw_result)
+    save_frame_metrics_csv(metrics_dir, gt_times, gt_angles, {label: pred_on_grid}, run_meta["leg"])
+    save_summary_csv(metrics_dir, {label: report})
+    save_run_info(metrics_dir, run_meta)
+
+    color = "#2563eb" if label.startswith("yolo") else "#dc2626"
+
+    fig, ax = plt.subplots(figsize=(5, 5))
+    ax.bar([label], [report["mean_error_deg"]], color=color)
+    ax.axhline(5, color="green", linestyle="--", alpha=0.6, label="Aceptable (<=5°)")
+    ax.axhline(10, color="orange", linestyle="--", alpha=0.6, label="Moderado (<=10°)")
+    ax.set_ylabel("Error medio (grados)")
+    ax.set_title(f"{label} -- {condition}")
+    ax.legend(fontsize=8)
+    plt.tight_layout()
+    plt.savefig(run_dir / "graphs" / "bars" / f"{label}_bar.png", dpi=120)
+    plt.close(fig)
+
+    fig, ax = plt.subplots(figsize=(14, 5))
+    ax.plot(gt_times, gt_angles, label="Gold standard (Maxtraq)", color="#1f2937", linewidth=2)
+    ax.plot(
+        gt_times, pred_on_grid, label=f"{label} (err. medio {report['mean_error_deg']:.1f}°)",
+        color=color, alpha=0.85, linewidth=1.3,
+    )
+    ax.set_xlabel("Tiempo (s, reloj del gold standard)")
+    ax.set_ylabel("Ángulo de rodilla (grados)")
+    ax.set_title(f"{label} vs. gold standard -- {condition}")
+    ax.legend()
+    ax.grid(alpha=0.3)
+    plt.tight_layout()
+    plt.savefig(run_dir / "graphs" / "curves" / f"{label}_curve.png", dpi=120)
+    plt.close(fig)
+
+    print(f"    -> guardado en: {run_dir}")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--video", required=True)
     parser.add_argument("--maxtraq", required=True)
     parser.add_argument("--offset", type=float, required=True)
     parser.add_argument("--leg", required=True, choices=["left_knee", "right_knee"])
-    parser.add_argument("--out", required=True, help="Gráfico de barras (error medio por variante)")
-    parser.add_argument("--out-yolo-curves", help="Gráfico de líneas: variantes YOLOv8 vs. gold standard")
-    parser.add_argument("--out-mediapipe-curves", help="Gráfico de líneas: variantes MediaPipe vs. gold standard")
+    parser.add_argument("--out", help="Gráfico de barras combinado, todas las variantes procesadas (opcional)")
+    parser.add_argument("--out-yolo-curves", help="Gráfico de líneas combinado: variantes YOLO vs. gold standard (opcional)")
+    parser.add_argument("--out-mediapipe-curves", help="Gráfico de líneas combinado: variantes MediaPipe vs. gold standard (opcional)")
     parser.add_argument(
         "--models",
         nargs="+",
@@ -107,9 +187,9 @@ def main() -> None:
     )
     parser.add_argument(
         "--store-dir",
-        help="Si se da, guarda keypoints (JSON) y métricas por frame/resumen (CSV) de esta corrida "
-        "en <store-dir>/runs/no_occlusion/<timestamp>/ o <store-dir>/runs/occlusion_<pierna>_knee/<timestamp>/ "
-        "según --occlude-knee, para no mezclar ambas condiciones",
+        help="Carpeta del video (ej. data/gold_standard/<video>). Si se da, cada modelo procesado se "
+        "guarda automáticamente en <store-dir>/<modelo>/<condicion>/<timestamp>/ -- ver "
+        "app/core/results_store.py para la jerarquía completa.",
     )
     parser.add_argument(
         "--occlude-knee",
@@ -119,13 +199,19 @@ def main() -> None:
         "mecánica que scripts/run_single_video.py). 'auto' detecta la posición real de la "
         "rodilla en el video; 'fixed' usa una coordenada de ejemplo (40%%/60%% del frame).",
     )
-    parser.add_argument(
-        "--occlude-leg",
-        choices=["left", "right"],
-        default=None,
-        help="Pierna a ocluir (default: la misma que --leg)",
-    )
+    parser.add_argument("--occlude-leg", choices=["left", "right"], default=None, help="Pierna a ocluir (default: la misma que --leg)")
     parser.add_argument("--occlude-radius-px", type=int, default=60)
+    parser.add_argument(
+        "--illumination",
+        choices=[level.value for level in IlluminationLevel],
+        default=None,
+        help="Simula un nivel de iluminación con OpenCV (ver app/core/illumination.py)",
+    )
+    parser.add_argument(
+        "--save-video",
+        action="store_true",
+        help="Guarda un .mp4 con el esqueleto dibujado en <run_dir>/videos/<modelo>.mp4 (requiere --store-dir)",
+    )
     args = parser.parse_args()
 
     yolo_variants = YOLO_VARIANTS
@@ -152,12 +238,10 @@ def main() -> None:
             (height, width), center_x=width * 0.4, center_y=height * 0.6, radius_px=args.occlude_radius_px
         )
 
-    run_dir = None
+    illumination_level = IlluminationLevel(args.illumination) if args.illumination else None
+    condition = _condition_label(args.occlude_knee, args.illumination)
     if args.store_dir:
-        subdir = f"occlusion_{occlusion_leg}_knee" if args.occlude_knee else "no_occlusion"
-        run_dir = create_run_dir(args.store_dir, subdir=subdir)
-    if run_dir:
-        print(f"Guardando keypoints y métricas de esta corrida en: {run_dir}")
+        print(f"Condición de esta corrida: {condition}")
 
     recording = parse_maxtraq_txt(args.maxtraq)
     gt_times = recording.times_s
@@ -166,68 +250,60 @@ def main() -> None:
     results: dict[str, dict] = {}
     curves: dict[str, list[float]] = {}
 
+    def _run_meta(label: str, run_dir: Path) -> dict:
+        return {
+            "video": args.video,
+            "maxtraq": args.maxtraq,
+            "offset_s": args.offset,
+            "leg": args.leg,
+            "model": label,
+            "condition": condition,
+            "occlusion_mode": args.occlude_knee,
+            "occlusion_leg": occlusion_leg if args.occlude_knee else None,
+            "occlusion_radius_px": args.occlude_radius_px if args.occlude_knee else None,
+            "illumination": args.illumination,
+            "timestamp_utc": run_dir.name,
+        }
+
+    def _process(label: str, estimator, model_name: ModelName) -> None:
+        run_dir = create_run_dir(args.store_dir, model_label=label, condition=condition) if args.store_dir else None
+
+        output_video_path = None
+        if run_dir and args.save_video:
+            videos_dir = run_dir / "videos"
+            videos_dir.mkdir(parents=True, exist_ok=True)
+            output_video_path = str(videos_dir / f"{label}.mp4")
+
+        t0 = time.perf_counter()
+        times, angles, raw_result = _angle_series(
+            args.video, estimator, model_name, args.leg,
+            occlusion_region=occlusion_region, illumination_level=illumination_level,
+            output_video_path=output_video_path,
+        )
+        elapsed = time.perf_counter() - t0
+
+        shifted = [t - args.offset for t in times]
+        pred_on_grid = resample_series(shifted, angles, gt_times)
+        report = compare_angle_series(pred_on_grid, gt_angles)
+        report["elapsed_s"] = round(elapsed, 1)
+        results[label] = report
+        curves[label] = pred_on_grid
+        print(f"  -> error medio {report['mean_error_deg']}°  ({elapsed:.1f}s)")
+
+        if run_dir:
+            _store_single_model_run(run_dir, label, condition, gt_times, gt_angles, pred_on_grid, report, raw_result, _run_meta(label, run_dir))
+
     for label, make_estimator in yolo_variants.items():
         print(f"Procesando {label}...")
-        t0 = time.perf_counter()
         try:
-            times, angles, raw_result = _angle_series(
-                args.video, make_estimator(), ModelName.YOLOV8, args.leg, occlusion_region=occlusion_region
-            )
+            _process(label, make_estimator(), ModelName.YOLOV8)
         except Exception as exc:
             print(f"  ERROR con {label}: {exc}")
             continue
-        elapsed = time.perf_counter() - t0
-
-        shifted = [t - args.offset for t in times]
-        pred_on_grid = resample_series(shifted, angles, gt_times)
-        report = compare_angle_series(pred_on_grid, gt_angles)
-        report["elapsed_s"] = round(elapsed, 1)
-        results[label] = report
-        curves[label] = pred_on_grid
-        if run_dir:
-            save_keypoints_json(run_dir, label, raw_result)
-        print(f"  -> error medio {report['mean_error_deg']}°  ({elapsed:.1f}s)")
 
     for label, complexity in mediapipe_variants.items():
         print(f"Procesando {label} (model_complexity={complexity})...")
-        t0 = time.perf_counter()
-        times, angles, raw_result = _angle_series(
-            args.video,
-            MediaPipePoseEstimator(model_complexity=complexity),
-            ModelName.MEDIAPIPE,
-            args.leg,
-            occlusion_region=occlusion_region,
-        )
-        elapsed = time.perf_counter() - t0
-
-        shifted = [t - args.offset for t in times]
-        pred_on_grid = resample_series(shifted, angles, gt_times)
-        report = compare_angle_series(pred_on_grid, gt_angles)
-        report["elapsed_s"] = round(elapsed, 1)
-        results[label] = report
-        curves[label] = pred_on_grid
-        if run_dir:
-            save_keypoints_json(run_dir, label, raw_result)
-        print(f"  -> error medio {report['mean_error_deg']}°  ({elapsed:.1f}s)")
-
-    if run_dir:
-        save_frame_metrics_csv(run_dir, gt_times, gt_angles, curves, args.leg)
-        save_summary_csv(run_dir, results)
-        save_run_info(
-            run_dir,
-            {
-                "video": args.video,
-                "maxtraq": args.maxtraq,
-                "offset_s": args.offset,
-                "leg": args.leg,
-                "models": list(results.keys()),
-                "occlusion_mode": args.occlude_knee,
-                "occlusion_leg": occlusion_leg if args.occlude_knee else None,
-                "occlusion_radius_px": args.occlude_radius_px if args.occlude_knee else None,
-                "timestamp_utc": run_dir.name,
-            },
-        )
-        print(f"Keypoints + CSV guardados en: {run_dir}")
+        _process(label, MediaPipePoseEstimator(model_complexity=complexity), ModelName.MEDIAPIPE)
 
     print()
     print(f"{'Variante':16s} {'Error medio':>12s} {'Error max':>10s} {'Tiempo':>8s} {'Clasificación':>15s}")
@@ -238,23 +314,24 @@ def main() -> None:
             f"{report['elapsed_s']:>7.1f}s {report['classification']:>15s}"
         )
 
-    labels = list(results.keys())
-    means = [results[label]["mean_error_deg"] for label in labels]
-    colors = ["#2563eb" if label.startswith("yolo") else "#dc2626" for label in labels]
+    if args.out:
+        labels = list(results.keys())
+        means = [results[label]["mean_error_deg"] for label in labels]
+        colors = ["#2563eb" if label.startswith("yolo") else "#dc2626" for label in labels]
 
-    fig, ax = plt.subplots(figsize=(10, 5))
-    ax.bar(labels, means, color=colors)
-    ax.axhline(5, color="green", linestyle="--", alpha=0.6, label="Aceptable (<=5°)")
-    ax.axhline(10, color="orange", linestyle="--", alpha=0.6, label="Moderado (<=10°)")
-    ax.set_ylabel("Error medio (grados)")
-    ax.set_title(f"Error medio por variante vs. gold standard ({args.leg})")
-    ax.legend()
-    plt.xticks(rotation=20)
-    plt.tight_layout()
-    plt.savefig(args.out, dpi=120)
-    print(f"\nGráfico de barras guardado en: {args.out}")
+        fig, ax = plt.subplots(figsize=(10, 5))
+        ax.bar(labels, means, color=colors)
+        ax.axhline(5, color="green", linestyle="--", alpha=0.6, label="Aceptable (<=5°)")
+        ax.axhline(10, color="orange", linestyle="--", alpha=0.6, label="Moderado (<=10°)")
+        ax.set_ylabel("Error medio (grados)")
+        ax.set_title(f"Error medio por variante vs. gold standard ({args.leg}, {condition})")
+        ax.legend()
+        plt.xticks(rotation=20)
+        plt.tight_layout()
+        plt.savefig(args.out, dpi=120)
+        print(f"\nGráfico de barras combinado guardado en: {args.out}")
 
-    def _plot_family_curves(family_labels: list[str], out_path: str, title: str, palette: list[str]) -> None:
+    def _plot_family_curves(family_labels: list[str], out_path: str, title: str, palette) -> None:
         fig, ax = plt.subplots(figsize=(14, 5))
         ax.plot(gt_times, gt_angles, label="Gold standard (Maxtraq)", color="#1f2937", linewidth=2)
         for label, color in zip(family_labels, palette):
@@ -268,7 +345,7 @@ def main() -> None:
         ax.grid(alpha=0.3)
         plt.tight_layout()
         plt.savefig(out_path, dpi=120)
-        print(f"Gráfico de curvas guardado en: {out_path}")
+        print(f"Gráfico de curvas combinado guardado en: {out_path}")
 
     if args.out_yolo_curves:
         n_yolo = len(YOLO_VARIANTS)
