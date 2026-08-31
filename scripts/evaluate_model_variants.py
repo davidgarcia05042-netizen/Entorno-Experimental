@@ -19,6 +19,20 @@ Uso (subconjunto de variantes + guardar keypoints/CSV de la corrida):
         --models yolo26n mediapipe_heavy \
         --out data/gold_standard/marcha_katherine_2026-06-19/variants_report.png \
         --store-dir data/gold_standard/marcha_katherine_2026-06-19
+
+Uso (con oclusión sintética sobre la rodilla, auto-centrada -- ver
+app/core/occlusion.py): igual que arriba más --occlude-knee auto. Si se
+pasa --store-dir, los resultados quedan en una subcarpeta separada de los
+runs sin oclusión (runs/no_occlusion/ vs. runs/occlusion_<pierna>_knee/),
+para no mezclar ambas condiciones:
+    python -m scripts.evaluate_model_variants \
+        --video data/gold_standard/marcha_katherine_2026-06-19/video.mp4 \
+        --maxtraq data/gold_standard/marcha_katherine_2026-06-19/maxtraq.TXT \
+        --offset -0.02 --leg left_knee \
+        --models yolo26n mediapipe_heavy mediapipe_lite \
+        --occlude-knee auto \
+        --out data/gold_standard/marcha_katherine_2026-06-19/variants_occluded.png \
+        --store-dir data/gold_standard/marcha_katherine_2026-06-19
 """
 
 import argparse
@@ -32,6 +46,7 @@ import matplotlib.pyplot as plt
 from app.core.ground_truth import compare_angle_series, knee_angle_series_deg, parse_maxtraq_txt, resample_series
 from app.core.keypoint_schema import Keypoint, UnifiedKeypoint
 from app.core.metrics import compute_joint_angles
+from app.core.occlusion import detect_reference_knee_position, get_first_frame_shape, region_around_point
 from app.core.results_store import create_run_dir, save_frame_metrics_csv, save_keypoints_json, save_run_info, save_summary_csv
 from app.core.video_processor import process_video
 from app.models.mediapipe_pose import MediaPipePoseEstimator
@@ -60,9 +75,9 @@ MEDIAPIPE_VARIANTS = {
 }
 
 
-def _angle_series(video_path: str, estimator, model_name: ModelName, leg: str):
+def _angle_series(video_path: str, estimator, model_name: ModelName, leg: str, occlusion_region=None):
     with estimator:
-        result = process_video(video_path, "variant_eval", estimator, model_name)
+        result = process_video(video_path, "variant_eval", estimator, model_name, occlusion_region=occlusion_region)
 
     times_s = [f.timestamp_ms / 1000 for f in result.frames]
     angles = []
@@ -92,9 +107,25 @@ def main() -> None:
     )
     parser.add_argument(
         "--store-dir",
-        help="Si se da, guarda keypoints (JSON) y métricas por frame/resumen (CSV) de esta "
-        "corrida en <store-dir>/runs/<timestamp>/",
+        help="Si se da, guarda keypoints (JSON) y métricas por frame/resumen (CSV) de esta corrida "
+        "en <store-dir>/runs/no_occlusion/<timestamp>/ o <store-dir>/runs/occlusion_<pierna>_knee/<timestamp>/ "
+        "según --occlude-knee, para no mezclar ambas condiciones",
     )
+    parser.add_argument(
+        "--occlude-knee",
+        choices=["auto", "fixed"],
+        default=None,
+        help="Aplica oclusión sintética sobre la rodilla ANTES de correr cada modelo (misma "
+        "mecánica que scripts/run_single_video.py). 'auto' detecta la posición real de la "
+        "rodilla en el video; 'fixed' usa una coordenada de ejemplo (40%%/60%% del frame).",
+    )
+    parser.add_argument(
+        "--occlude-leg",
+        choices=["left", "right"],
+        default=None,
+        help="Pierna a ocluir (default: la misma que --leg)",
+    )
+    parser.add_argument("--occlude-radius-px", type=int, default=60)
     args = parser.parse_args()
 
     yolo_variants = YOLO_VARIANTS
@@ -106,7 +137,25 @@ def main() -> None:
         yolo_variants = {k: v for k, v in YOLO_VARIANTS.items() if k in args.models}
         mediapipe_variants = {k: v for k, v in MEDIAPIPE_VARIANTS.items() if k in args.models}
 
-    run_dir = create_run_dir(args.store_dir) if args.store_dir else None
+    occlusion_region = None
+    occlusion_leg = args.occlude_leg or args.leg.removesuffix("_knee")
+    if args.occlude_knee == "auto":
+        center_x, center_y = detect_reference_knee_position(args.video, occlusion_leg)
+        print(f"Rodilla {occlusion_leg} detectada en ({center_x:.0f}, {center_y:.0f}) px -- oclusión centrada ahí.")
+        height, width = get_first_frame_shape(args.video)
+        occlusion_region = region_around_point(
+            (height, width), center_x=center_x, center_y=center_y, radius_px=args.occlude_radius_px
+        )
+    elif args.occlude_knee == "fixed":
+        height, width = get_first_frame_shape(args.video)
+        occlusion_region = region_around_point(
+            (height, width), center_x=width * 0.4, center_y=height * 0.6, radius_px=args.occlude_radius_px
+        )
+
+    run_dir = None
+    if args.store_dir:
+        subdir = f"occlusion_{occlusion_leg}_knee" if args.occlude_knee else "no_occlusion"
+        run_dir = create_run_dir(args.store_dir, subdir=subdir)
     if run_dir:
         print(f"Guardando keypoints y métricas de esta corrida en: {run_dir}")
 
@@ -121,7 +170,9 @@ def main() -> None:
         print(f"Procesando {label}...")
         t0 = time.perf_counter()
         try:
-            times, angles, raw_result = _angle_series(args.video, make_estimator(), ModelName.YOLOV8, args.leg)
+            times, angles, raw_result = _angle_series(
+                args.video, make_estimator(), ModelName.YOLOV8, args.leg, occlusion_region=occlusion_region
+            )
         except Exception as exc:
             print(f"  ERROR con {label}: {exc}")
             continue
@@ -141,7 +192,11 @@ def main() -> None:
         print(f"Procesando {label} (model_complexity={complexity})...")
         t0 = time.perf_counter()
         times, angles, raw_result = _angle_series(
-            args.video, MediaPipePoseEstimator(model_complexity=complexity), ModelName.MEDIAPIPE, args.leg
+            args.video,
+            MediaPipePoseEstimator(model_complexity=complexity),
+            ModelName.MEDIAPIPE,
+            args.leg,
+            occlusion_region=occlusion_region,
         )
         elapsed = time.perf_counter() - t0
 
@@ -166,6 +221,9 @@ def main() -> None:
                 "offset_s": args.offset,
                 "leg": args.leg,
                 "models": list(results.keys()),
+                "occlusion_mode": args.occlude_knee,
+                "occlusion_leg": occlusion_leg if args.occlude_knee else None,
+                "occlusion_radius_px": args.occlude_radius_px if args.occlude_knee else None,
                 "timestamp_utc": run_dir.name,
             },
         )

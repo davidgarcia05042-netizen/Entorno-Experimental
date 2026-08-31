@@ -16,61 +16,12 @@ import argparse
 import json
 from pathlib import Path
 
-import cv2
-
 from app.core.illumination import IlluminationLevel
-from app.core.keypoint_schema import UnifiedKeypoint
-from app.core.occlusion import region_around_point
+from app.core.occlusion import detect_reference_knee_position, get_first_frame_shape, region_around_point
 from app.core.video_processor import process_video
 from app.models.mediapipe_pose import MediaPipePoseEstimator
 from app.models.yolov8_pose import YoloV8PoseEstimator
 from app.schemas.pose_result import ModelName
-
-
-def _get_first_frame_shape(video_path: str) -> tuple[int, int]:
-    cap = cv2.VideoCapture(video_path)
-    ret, frame = cap.read()
-    cap.release()
-    if not ret:
-        raise FileNotFoundError(f"No se pudo leer el video: {video_path}")
-    return frame.shape[:2]
-
-
-def _detect_reference_knee_position(video_path: str, leg: str, max_probe_frames: int = 30) -> tuple[float, float]:
-    """
-    Corre MediaPipe frame a frame (barato, sin guardar nada) hasta encontrar
-    uno donde la rodilla objetivo esté visible con confianza suficiente, y
-    devuelve su posición en píxeles (x, y).
-
-    Pensado para videos de caminadora: el sujeto no se desplaza
-    horizontalmente por el frame, así que UNA posición de referencia sirve
-    para ocluir esa zona durante todo el video. Para videos con
-    desplazamiento real (ej. caminar por un pasillo), esta aproximación
-    estática no sería suficiente -- habría que ocluir por frame según el
-    keypoint detectado en cada uno, algo que este script no hace todavía.
-    """
-    target = UnifiedKeypoint.LEFT_KNEE if leg == "left" else UnifiedKeypoint.RIGHT_KNEE
-    cap = cv2.VideoCapture(video_path)
-    if not cap.isOpened():
-        raise FileNotFoundError(f"No se pudo abrir el video: {video_path}")
-
-    with MediaPipePoseEstimator() as estimator:
-        try:
-            for _ in range(max_probe_frames):
-                ret, frame = cap.read()
-                if not ret:
-                    break
-                for kp in estimator.predict(frame):
-                    if kp.name == target and kp.visible and kp.confidence >= 0.5:
-                        return kp.x, kp.y
-        finally:
-            cap.release()
-
-    raise RuntimeError(
-        f"No se pudo detectar la rodilla {leg} con confianza suficiente en los primeros "
-        f"{max_probe_frames} frames de {video_path}. Prueba con --occlude-knee fixed, o revisa "
-        "que el video muestre claramente esa pierna al inicio."
-    )
 
 
 def main() -> None:
@@ -110,14 +61,14 @@ def main() -> None:
 
     occlusion_region = None
     if args.occlude_knee == "auto":
-        center_x, center_y = _detect_reference_knee_position(args.video, args.occlude_leg)
+        center_x, center_y = detect_reference_knee_position(args.video, args.occlude_leg)
         print(f"Rodilla {args.occlude_leg} detectada en ({center_x:.0f}, {center_y:.0f}) px -- oclusión centrada ahí.")
-        height, width = _get_first_frame_shape(args.video)
+        height, width = get_first_frame_shape(args.video)
         occlusion_region = region_around_point(
             (height, width), center_x=center_x, center_y=center_y, radius_px=args.occlude_radius_px
         )
     elif args.occlude_knee == "fixed":
-        height, width = _get_first_frame_shape(args.video)
+        height, width = get_first_frame_shape(args.video)
         # Coordenada de ejemplo, no ligada a la posición real de la persona
         # en este video -- usar solo si "auto" falla o para pruebas rápidas.
         occlusion_region = region_around_point(

@@ -21,10 +21,17 @@ from pathlib import Path
 from app.schemas.pose_result import VideoAnalysisResult
 
 
-def create_run_dir(base_dir: str | Path) -> Path:
-    """Crea (y devuelve) `<base_dir>/runs/<timestamp_utc>/`."""
+def create_run_dir(base_dir: str | Path, subdir: str | None = None) -> Path:
+    """
+    Crea (y devuelve) `<base_dir>/runs/<timestamp_utc>/`, o
+    `<base_dir>/runs/<subdir>/<timestamp_utc>/` si se pasa `subdir`.
+
+    `subdir` sirve para separar condiciones de la corrida que no deben
+    mezclarse (ej. "no_occlusion" vs. "occlusion_left_knee"), sin perder el
+    versionado por timestamp dentro de cada una.
+    """
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    run_dir = Path(base_dir) / "runs" / timestamp
+    run_dir = Path(base_dir) / "runs" / (subdir or "") / timestamp
     run_dir.mkdir(parents=True, exist_ok=True)
     return run_dir
 

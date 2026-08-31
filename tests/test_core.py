@@ -224,6 +224,15 @@ def test_create_run_dir_makes_a_timestamped_folder_under_runs(tmp_path: Path):
     assert run_dir.parent.parent == tmp_path
 
 
+def test_create_run_dir_with_subdir_separates_occlusion_conditions(tmp_path: Path):
+    no_occlusion_dir = create_run_dir(tmp_path, subdir="no_occlusion")
+    occlusion_dir = create_run_dir(tmp_path, subdir="occlusion_left_knee")
+
+    assert no_occlusion_dir.parent.name == "no_occlusion"
+    assert occlusion_dir.parent.name == "occlusion_left_knee"
+    assert no_occlusion_dir.parent.parent == occlusion_dir.parent.parent == tmp_path / "runs"
+
+
 def test_save_keypoints_json_writes_readable_pose_result(tmp_path: Path):
     result = VideoAnalysisResult(
         video_id="test_video",
