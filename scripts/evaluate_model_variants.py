@@ -8,35 +8,42 @@ jerarquía estándar del proyecto (ver app/core/results_store.py):
         graphs/bars/        barra de error medio de este modelo
         videos/             video anotado (solo si se pide --save-video)
 
-`condicion` es "no_occlusion" (default), "occlusion" (--occlude-knee),
+`condicion` es "no_occlusion" (default), "occlusion" (--occlude-joint),
 "illumination" (--illumination), o "occlusion_illumination" si ambas se
 combinan. Cada modelo procesado en una misma invocación se guarda en su
 propia carpeta -- nunca se mezclan modelos ni condiciones distintas.
 
-Uso (barrido completo, sin guardar nada -- solo consola + gráfico combinado):
+--joint acepta cualquier articulación de JOINT_ANGLE_TRIPLETS (no solo
+rodilla) y --gt-marker-ids indica qué 3 marcadores del archivo Maxtraq
+(proximal, vértice, distal) corresponden a esa articulación en ESTA
+grabación -- ver app/core/ground_truth.py::marker_angle_series_deg. El
+default (1,3,5) es la convención de Marcha Katherine; para los videos de
+"TOMA FRONTAL" la convención confirmada es (1,2,3) (vértice=#2 siempre).
+
+Uso (Marcha Katherine, rodilla, barrido completo):
     python -m scripts.evaluate_model_variants \
         --video data/gold_standard/marcha_katherine_2026-06-19/video.mp4 \
         --maxtraq data/gold_standard/marcha_katherine_2026-06-19/maxtraq.TXT \
-        --offset -0.02 --leg left_knee \
+        --offset -0.02 --joint left_knee \
         --out data/gold_standard/marcha_katherine_2026-06-19/variants_report.png
 
-Uso (guardado automático por modelo, sin oclusión):
+Uso (TOMA FRONTAL, hombro, guardado automático por modelo, sin oclusión):
     python -m scripts.evaluate_model_variants \
-        --video data/gold_standard/marcha_katherine_2026-06-19/video.mp4 \
-        --maxtraq data/gold_standard/marcha_katherine_2026-06-19/maxtraq.TXT \
-        --offset -0.02 --leg left_knee \
+        --video "data/gold_standard/TOMA FRONTAL/2EJ1/2EJ1.mp4" \
+        --maxtraq "data/gold_standard/TOMA FRONTAL/2EJ1/2EJ1.TXT" \
+        --offset -0.20 --joint left_shoulder --gt-marker-ids 1 2 3 \
         --models yolo26n mediapipe_heavy mediapipe_lite \
-        --store-dir data/gold_standard/marcha_katherine_2026-06-19
+        --store-dir "data/gold_standard/TOMA FRONTAL/2EJ1"
 
-Uso (con oclusión auto-centrada en la rodilla, o con iluminación simulada
--- cada una cae en su propia carpeta "occlusion"/"illumination"):
+Uso (con oclusión auto-centrada en la articulación medida, o con
+iluminación simulada -- cada una cae en su propia carpeta):
     python -m scripts.evaluate_model_variants \
-        --video data/gold_standard/marcha_katherine_2026-06-19/video.mp4 \
-        --maxtraq data/gold_standard/marcha_katherine_2026-06-19/maxtraq.TXT \
-        --offset -0.02 --leg left_knee \
+        --video "data/gold_standard/TOMA FRONTAL/2EJ1/2EJ1.mp4" \
+        --maxtraq "data/gold_standard/TOMA FRONTAL/2EJ1/2EJ1.TXT" \
+        --offset -0.20 --joint left_shoulder --gt-marker-ids 1 2 3 \
         --models yolo26n mediapipe_heavy mediapipe_lite \
-        --occlude-knee auto \
-        --store-dir data/gold_standard/marcha_katherine_2026-06-19
+        --occlude-joint left_shoulder \
+        --store-dir "data/gold_standard/TOMA FRONTAL/2EJ1"
 """
 
 import argparse
@@ -48,11 +55,11 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-from app.core.ground_truth import compare_angle_series, knee_angle_series_deg, parse_maxtraq_txt, resample_series
+from app.core.ground_truth import compare_angle_series, marker_angle_series_deg, parse_maxtraq_txt, resample_series
 from app.core.illumination import IlluminationLevel
-from app.core.keypoint_schema import Keypoint, UnifiedKeypoint
+from app.core.keypoint_schema import JOINT_ANGLE_TRIPLETS, Keypoint, UnifiedKeypoint
 from app.core.metrics import compute_joint_angles
-from app.core.occlusion import detect_reference_knee_position, get_first_frame_shape, region_around_point
+from app.core.occlusion import detect_reference_joint_position, get_first_frame_shape, region_around_point
 from app.core.results_store import create_run_dir, save_frame_metrics_csv, save_keypoints_json, save_run_info, save_summary_csv
 from app.core.video_processor import process_video
 from app.models.mediapipe_pose import MediaPipePoseEstimator
@@ -81,9 +88,9 @@ MEDIAPIPE_VARIANTS = {
 }
 
 
-def _condition_label(occlude_knee: str | None, illumination: str | None) -> str:
+def _condition_label(occlude_joint: str | None, illumination: str | None) -> str:
     parts = []
-    if occlude_knee:
+    if occlude_joint:
         parts.append("occlusion")
     if illumination:
         parts.append("illumination")
@@ -94,7 +101,7 @@ def _angle_series(
     video_path: str,
     estimator,
     model_name: ModelName,
-    leg: str,
+    joint: str,
     occlusion_region=None,
     illumination_level=None,
     output_video_path: str | None = None,
@@ -117,7 +124,7 @@ def _angle_series(
             Keypoint(name=UnifiedKeypoint(kp.name), x=kp.x, y=kp.y, confidence=kp.confidence, visible=kp.visible)
             for kp in frame.keypoints
         ]
-        angles.append(compute_joint_angles(kpts)[leg])
+        angles.append(compute_joint_angles(kpts)[joint])
     return times_s, angles, result
 
 
@@ -135,7 +142,7 @@ def _store_single_model_run(
     """Guarda metrics/ (JSON+CSV) y graphs/{curves,bars}/ (PNG) de UN modelo en su run_dir ya creado."""
     metrics_dir = run_dir / "metrics"
     save_keypoints_json(metrics_dir, label, raw_result)
-    save_frame_metrics_csv(metrics_dir, gt_times, gt_angles, {label: pred_on_grid}, run_meta["leg"])
+    save_frame_metrics_csv(metrics_dir, gt_times, gt_angles, {label: pred_on_grid}, run_meta["joint"])
     save_summary_csv(metrics_dir, {label: report})
     save_run_info(metrics_dir, run_meta)
 
@@ -159,7 +166,7 @@ def _store_single_model_run(
         color=color, alpha=0.85, linewidth=1.3,
     )
     ax.set_xlabel("Tiempo (s, reloj del gold standard)")
-    ax.set_ylabel("Ángulo de rodilla (grados)")
+    ax.set_ylabel(f"Ángulo ({run_meta['joint']}, grados)")
     ax.set_title(f"{label} vs. gold standard -- {condition}")
     ax.legend()
     ax.grid(alpha=0.3)
@@ -175,7 +182,16 @@ def main() -> None:
     parser.add_argument("--video", required=True)
     parser.add_argument("--maxtraq", required=True)
     parser.add_argument("--offset", type=float, required=True)
-    parser.add_argument("--leg", required=True, choices=["left_knee", "right_knee"])
+    parser.add_argument("--joint", required=True, choices=list(JOINT_ANGLE_TRIPLETS))
+    parser.add_argument(
+        "--gt-marker-ids",
+        type=int,
+        nargs=3,
+        default=[1, 3, 5],
+        metavar=("PROXIMAL", "VERTEX", "DISTAL"),
+        help="IDs de marcador Maxtraq (proximal, vértice, distal) para esta grabación. "
+        "Default (1,3,5) = convención de Marcha Katherine. TOMA FRONTAL usa (1,2,3).",
+    )
     parser.add_argument("--out", help="Gráfico de barras combinado, todas las variantes procesadas (opcional)")
     parser.add_argument("--out-yolo-curves", help="Gráfico de líneas combinado: variantes YOLO vs. gold standard (opcional)")
     parser.add_argument("--out-mediapipe-curves", help="Gráfico de líneas combinado: variantes MediaPipe vs. gold standard (opcional)")
@@ -192,14 +208,13 @@ def main() -> None:
         "app/core/results_store.py para la jerarquía completa.",
     )
     parser.add_argument(
-        "--occlude-knee",
-        choices=["auto", "fixed"],
+        "--occlude-joint",
+        choices=[k.value for k in UnifiedKeypoint],
         default=None,
-        help="Aplica oclusión sintética sobre la rodilla ANTES de correr cada modelo (misma "
-        "mecánica que scripts/run_single_video.py). 'auto' detecta la posición real de la "
-        "rodilla en el video; 'fixed' usa una coordenada de ejemplo (40%%/60%% del frame).",
+        help="Si se da, aplica oclusión sintética ANTES de correr cada modelo, auto-centrada en "
+        "esta articulación (detectada en los primeros frames del video). Normalmente la misma "
+        "que --joint, para probar la robustez del modelo justo donde se mide el error.",
     )
-    parser.add_argument("--occlude-leg", choices=["left", "right"], default=None, help="Pierna a ocluir (default: la misma que --leg)")
     parser.add_argument("--occlude-radius-px", type=int, default=60)
     parser.add_argument(
         "--illumination",
@@ -224,28 +239,23 @@ def main() -> None:
         mediapipe_variants = {k: v for k, v in MEDIAPIPE_VARIANTS.items() if k in args.models}
 
     occlusion_region = None
-    occlusion_leg = args.occlude_leg or args.leg.removesuffix("_knee")
-    if args.occlude_knee == "auto":
-        center_x, center_y = detect_reference_knee_position(args.video, occlusion_leg)
-        print(f"Rodilla {occlusion_leg} detectada en ({center_x:.0f}, {center_y:.0f}) px -- oclusión centrada ahí.")
+    if args.occlude_joint:
+        target = UnifiedKeypoint(args.occlude_joint)
+        center_x, center_y = detect_reference_joint_position(args.video, target)
+        print(f"{args.occlude_joint} detectado en ({center_x:.0f}, {center_y:.0f}) px -- oclusión centrada ahí.")
         height, width = get_first_frame_shape(args.video)
         occlusion_region = region_around_point(
             (height, width), center_x=center_x, center_y=center_y, radius_px=args.occlude_radius_px
         )
-    elif args.occlude_knee == "fixed":
-        height, width = get_first_frame_shape(args.video)
-        occlusion_region = region_around_point(
-            (height, width), center_x=width * 0.4, center_y=height * 0.6, radius_px=args.occlude_radius_px
-        )
 
     illumination_level = IlluminationLevel(args.illumination) if args.illumination else None
-    condition = _condition_label(args.occlude_knee, args.illumination)
+    condition = _condition_label(args.occlude_joint, args.illumination)
     if args.store_dir:
         print(f"Condición de esta corrida: {condition}")
 
     recording = parse_maxtraq_txt(args.maxtraq)
     gt_times = recording.times_s
-    gt_angles = knee_angle_series_deg(recording)
+    gt_angles = marker_angle_series_deg(recording, tuple(args.gt_marker_ids))
 
     results: dict[str, dict] = {}
     curves: dict[str, list[float]] = {}
@@ -255,12 +265,12 @@ def main() -> None:
             "video": args.video,
             "maxtraq": args.maxtraq,
             "offset_s": args.offset,
-            "leg": args.leg,
+            "joint": args.joint,
+            "gt_marker_ids": args.gt_marker_ids,
             "model": label,
             "condition": condition,
-            "occlusion_mode": args.occlude_knee,
-            "occlusion_leg": occlusion_leg if args.occlude_knee else None,
-            "occlusion_radius_px": args.occlude_radius_px if args.occlude_knee else None,
+            "occlude_joint": args.occlude_joint,
+            "occlusion_radius_px": args.occlude_radius_px if args.occlude_joint else None,
             "illumination": args.illumination,
             "timestamp_utc": run_dir.name,
         }
@@ -276,7 +286,7 @@ def main() -> None:
 
         t0 = time.perf_counter()
         times, angles, raw_result = _angle_series(
-            args.video, estimator, model_name, args.leg,
+            args.video, estimator, model_name, args.joint,
             occlusion_region=occlusion_region, illumination_level=illumination_level,
             output_video_path=output_video_path,
         )
@@ -324,7 +334,7 @@ def main() -> None:
         ax.axhline(5, color="green", linestyle="--", alpha=0.6, label="Aceptable (<=5°)")
         ax.axhline(10, color="orange", linestyle="--", alpha=0.6, label="Moderado (<=10°)")
         ax.set_ylabel("Error medio (grados)")
-        ax.set_title(f"Error medio por variante vs. gold standard ({args.leg}, {condition})")
+        ax.set_title(f"Error medio por variante vs. gold standard ({args.joint}, {condition})")
         ax.legend()
         plt.xticks(rotation=20)
         plt.tight_layout()
@@ -339,7 +349,7 @@ def main() -> None:
                 continue
             ax.plot(gt_times, curves[label], label=f"{label} (err. medio {results[label]['mean_error_deg']:.1f}°)", color=color, alpha=0.8, linewidth=1.2)
         ax.set_xlabel("Tiempo (s, reloj del gold standard)")
-        ax.set_ylabel("Ángulo de rodilla (grados)")
+        ax.set_ylabel(f"Ángulo ({args.joint}, grados)")
         ax.set_title(title)
         ax.legend()
         ax.grid(alpha=0.3)
@@ -353,7 +363,7 @@ def main() -> None:
         _plot_family_curves(
             list(YOLO_VARIANTS.keys()),
             args.out_yolo_curves,
-            f"YOLOv8 / YOLO11 / YOLO26 (variantes) vs. gold standard ({args.leg})",
+            f"YOLOv8 / YOLO11 / YOLO26 (variantes) vs. gold standard ({args.joint})",
             yolo_palette,
         )
 
@@ -361,7 +371,7 @@ def main() -> None:
         _plot_family_curves(
             list(MEDIAPIPE_VARIANTS.keys()),
             args.out_mediapipe_curves,
-            f"MediaPipe (variantes) vs. gold standard ({args.leg})",
+            f"MediaPipe (variantes) vs. gold standard ({args.joint})",
             ["#fca5a5", "#ef4444", "#b91c1c"],
         )
 

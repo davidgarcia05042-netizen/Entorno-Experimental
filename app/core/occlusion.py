@@ -99,24 +99,26 @@ def get_first_frame_shape(video_path: str) -> tuple[int, int]:
     return frame.shape[:2]
 
 
-def detect_reference_knee_position(video_path: str, leg: str, max_probe_frames: int = 30) -> tuple[float, float]:
+def detect_reference_joint_position(
+    video_path: str, target: UnifiedKeypoint, max_probe_frames: int = 30
+) -> tuple[float, float]:
     """
     Corre MediaPipe frame a frame (barato, sin guardar nada) hasta encontrar
-    uno donde la rodilla objetivo esté visible con confianza suficiente, y
-    devuelve su posición en píxeles (x, y).
+    uno donde `target` esté visible con confianza suficiente, y devuelve su
+    posición en píxeles (x, y).
 
-    Pensado para videos de caminadora: el sujeto no se desplaza
-    horizontalmente por el frame, así que UNA posición de referencia sirve
-    para ocluir esa zona durante todo el video. Para videos con
-    desplazamiento real (ej. caminar por un pasillo), esta aproximación
-    estática no sería suficiente -- habría que ocluir por frame según el
-    keypoint detectado en cada uno, algo que no se implementa todavía.
+    Pensado para videos donde el sujeto no se desplaza mucho por el frame
+    (caminadora, ejercicios de pie/sentado en un punto fijo): UNA posición
+    de referencia sirve para ocluir esa zona durante todo el video. Para
+    videos con desplazamiento real (ej. caminar por un pasillo), esta
+    aproximación estática no sería suficiente -- habría que ocluir por
+    frame según el keypoint detectado en cada uno, algo que no se
+    implementa todavía.
 
     Usada tanto por scripts/run_single_video.py (demo visual) como por
-    scripts/evaluate_model_variants.py (--occlude-knee, métricas contra
+    scripts/evaluate_model_variants.py (--occlude-joint, métricas contra
     gold standard) para no duplicar esta lógica.
     """
-    target = UnifiedKeypoint.LEFT_KNEE if leg == "left" else UnifiedKeypoint.RIGHT_KNEE
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
         raise FileNotFoundError(f"No se pudo abrir el video: {video_path}")
@@ -134,10 +136,16 @@ def detect_reference_knee_position(video_path: str, leg: str, max_probe_frames: 
             cap.release()
 
     raise RuntimeError(
-        f"No se pudo detectar la rodilla {leg} con confianza suficiente en los primeros "
-        f"{max_probe_frames} frames de {video_path}. Prueba con --occlude-knee fixed, o revisa "
-        "que el video muestre claramente esa pierna al inicio."
+        f"No se pudo detectar {target.value} con confianza suficiente en los primeros "
+        f"{max_probe_frames} frames de {video_path}. Revisa que el video muestre claramente "
+        "esa articulación al inicio."
     )
+
+
+def detect_reference_knee_position(video_path: str, leg: str, max_probe_frames: int = 30) -> tuple[float, float]:
+    """Alias retrocompatible de detect_reference_joint_position para la rodilla."""
+    target = UnifiedKeypoint.LEFT_KNEE if leg == "left" else UnifiedKeypoint.RIGHT_KNEE
+    return detect_reference_joint_position(video_path, target, max_probe_frames)
 
 
 def occlusion_fraction_of_frame(region: OcclusionRegion, frame_shape: tuple[int, int]) -> float:

@@ -127,14 +127,18 @@ def _angle_3d_deg(a: Point3D, vertex: Point3D, c: Point3D) -> float:
     return math.degrees(math.acos(cos_angle))
 
 
-def knee_angle_series_deg(
+def marker_angle_series_deg(
     recording: MaxtraqRecording,
-    marker_ids: tuple[int, int, int] = KNEE_ANGLE_MARKER_IDS,
+    marker_ids: tuple[int, int, int],
 ) -> list[float]:
     """
-    Serie de ángulo de rodilla por frame, calculada a partir de los 3
-    marcadores 3D confirmados por el laboratorio. NaN en los frames donde
-    algún marcador no fue visible.
+    Serie de ángulo por frame formado por 3 marcadores 3D (proximal,
+    vértice, distal) -- pese al nombre histórico "knee" de su alias, esto
+    sirve para CUALQUIER articulación de 3 marcadores (hombro, codo,
+    cadera, rodilla, etc.), no solo rodilla. Qué articulación representa
+    depende de `marker_ids` y de la convención de marcadores de esa
+    grabación en particular (ver docstring del módulo). NaN en los frames
+    donde algún marcador no fue visible.
     """
     proximal_id, vertex_id, distal_id = marker_ids
     proximal_pts = recording.points[proximal_id]
@@ -148,6 +152,14 @@ def knee_angle_series_deg(
         else:
             angles.append(_angle_3d_deg(a, vertex, c))
     return angles
+
+
+def knee_angle_series_deg(
+    recording: MaxtraqRecording,
+    marker_ids: tuple[int, int, int] = KNEE_ANGLE_MARKER_IDS,
+) -> list[float]:
+    """Alias retrocompatible de marker_angle_series_deg, default = marcadores de rodilla de Marcha Katherine."""
+    return marker_angle_series_deg(recording, marker_ids)
 
 
 def resample_series(times_s: list[float], values_deg: list[float], grid_times_s: list[float]) -> list[float]:

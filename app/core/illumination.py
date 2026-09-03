@@ -42,13 +42,16 @@ _GAMMA_BY_LEVEL = {
 
 
 def apply_gamma_correction(frame: np.ndarray, gamma: float) -> np.ndarray:
-    """Aplica corrección gamma: salida = 255 * (entrada/255) ** (1/gamma)."""
+    """
+    Aplica corrección gamma: salida = 255 * (entrada/255) ** gamma.
+    gamma > 1 oscurece (curva cóncava, empuja los valores hacia 0);
+    gamma < 1 aclara (curva convexa, empuja los valores hacia 255).
+    """
     if gamma == 1.0:
         return frame.copy()
 
-    inv_gamma = 1.0 / gamma
     lookup_table = np.array(
-        [((i / 255.0) ** inv_gamma) * 255 for i in range(256)]
+        [((i / 255.0) ** gamma) * 255 for i in range(256)]
     ).astype("uint8")
     return cv2.LUT(frame, lookup_table)
 
